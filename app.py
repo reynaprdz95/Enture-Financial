@@ -281,7 +281,7 @@ def build_monthly_fondeo_snapshot(df: pd.DataFrame, n_months: int = 12) -> pd.Da
     if 'moneda' not in base.columns: base['moneda'] = 'MXN'
     base['moneda'] = base['moneda'].apply(normalizar_moneda)
     cierre_actual = pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(0)
-    meses = pd.date_range(end=cierre_actual, periods=n_months, freq='M')
+    meses = pd.date_range(end=cierre_actual, periods=n_months, freq='ME')
     registros = []
     for mes in meses:
         activos = base[base['fecha_inicio'].notna() & (base['fecha_inicio'] <= mes) & (base['fecha_vencimiento'].isna() | (base['fecha_vencimiento'] >= mes))].copy()
