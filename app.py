@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-st.set_page_config(page_title='Análisis de Cartera Financiera', page_icon='📊', layout='wide', initial_sidebar_state='expanded')
+st.set_page_config(page_title='Análisis de Cartera Financiera', layout='wide', initial_sidebar_state='expanded')
 
 ENTURE_PRIMARY = '#B03927'
 ENTURE_PRIMARY_DARK = '#4C0C05'
@@ -27,6 +27,7 @@ PLOT_COLORS = [
     '#9F2D20', '#C86428', '#2A3348', '#7A1B10'
 ]
 PLOT_CONFIG = {'displayModeBar': False, 'displaylogo': False, 'responsive': True}
+DAY_COUNT_BASE = 360
 
 
 def inject_custom_css():
@@ -209,13 +210,13 @@ def enriquecer_fondeo_costos(df: pd.DataFrame, fecha_ref=None) -> pd.DataFrame:
     if 'saldo_actual' not in out.columns:
         out['saldo_actual'] = np.nan
     if 'base_calculo' not in out.columns:
-        out['base_calculo'] = 365
+        out['base_calculo'] = DAY_COUNT_BASE
     out['saldo_base'] = pd.to_numeric(out['saldo_actual'], errors='coerce').fillna(pd.to_numeric(out['monto_invertido'], errors='coerce')).fillna(0.0)
-    out['base_calculo'] = pd.to_numeric(out['base_calculo'], errors='coerce').replace(0, np.nan).fillna(365)
+    out['base_calculo'] = pd.to_numeric(out['base_calculo'], errors='coerce').replace(0, np.nan).fillna(DAY_COUNT_BASE)
     out['tasa_efectiva'] = pd.to_numeric(out['tasa_efectiva'], errors='coerce').fillna(0.0)
     out['costo_anual_estimado'] = out['saldo_base'] * out['tasa_efectiva']
     mes_inicio, mes_fin = obtener_mes_actual_bounds(fecha_ref)
-    out['dias_mes_actual'] = out.apply(lambda r: 30.42 if esta_activa_en_mes(r.get('fecha_inicio'), r.get('fecha_vencimiento'), mes_inicio, mes_fin) else 0.0, axis=1)
+    out['dias_mes_actual'] = out.apply(lambda r: dias_operacion_en_mes(r.get('fecha_inicio'), r.get('fecha_vencimiento'), mes_inicio, mes_fin), axis=1)
     out['interes_mes_actual'] = out['saldo_base'] * out['tasa_efectiva'] * out['dias_mes_actual'] / out['base_calculo']
     return out
 
@@ -225,9 +226,9 @@ def enriquecer_colocacion_ingresos(df: pd.DataFrame, fecha_ref=None) -> pd.DataF
     if 'saldo_actual' not in out.columns:
         out['saldo_actual'] = np.nan
     if 'base_calculo' not in out.columns:
-        out['base_calculo'] = 365
+        out['base_calculo'] = DAY_COUNT_BASE
     out['saldo_base_credito'] = pd.to_numeric(out['saldo_actual'], errors='coerce').fillna(pd.to_numeric(out['monto_colocado'], errors='coerce')).fillna(0.0)
-    out['base_calculo'] = pd.to_numeric(out['base_calculo'], errors='coerce').replace(0, np.nan).fillna(365)
+    out['base_calculo'] = pd.to_numeric(out['base_calculo'], errors='coerce').replace(0, np.nan).fillna(DAY_COUNT_BASE)
     out['tasa_colocacion'] = pd.to_numeric(out['tasa_colocacion'], errors='coerce').fillna(0.0)
     out['ingreso_anual_estimado'] = out['saldo_base_credito'] * out['tasa_colocacion']
     mes_inicio, mes_fin = obtener_mes_actual_bounds(fecha_ref)
@@ -321,7 +322,7 @@ def parse_temporalidad_a_dias(valor):
     if 'bimestre' in texto: return n * 60 if not pd.isna(n) else 60
     if 'trimestre' in texto: return n * 90 if not pd.isna(n) else 90
     if 'semestre' in texto: return n * 180 if not pd.isna(n) else 180
-    if 'ano' in texto or 'año' in texto: return n * 365 if not pd.isna(n) else 365
+    if 'ano' in texto or 'año' in texto: return n * DAY_COUNT_BASE if not pd.isna(n) else DAY_COUNT_BASE
     return n if not pd.isna(n) else np.nan
 
 
@@ -356,9 +357,15 @@ def completar_plazo_dias(df: pd.DataFrame, plazo_col: str, fecha_inicio_col: str
 
 def completar_temporalidad(df: pd.DataFrame, plazo_col: str = 'plazo_dias', temporalidad_col: str = 'temporalidad') -> pd.DataFrame:
     df = df.copy()
-    if temporalidad_col not in df.columns: df[temporalidad_col] = np.nan
+    if temporalidad_col not in df.columns:
+        df[temporalidad_col] = pd.Series(pd.NA, index=df.index, dtype='object')
+    else:
+        df[temporalidad_col] = df[temporalidad_col].astype('object')
+    if plazo_col not in df.columns:
+        return df
     vacio = df[temporalidad_col].isna() | (df[temporalidad_col].astype(str).str.strip() == '')
-    df.loc[vacio, temporalidad_col] = df.loc[vacio, plazo_col].apply(dias_a_temporalidad)
+    if vacio.any():
+        df.loc[vacio, temporalidad_col] = df.loc[vacio, plazo_col].apply(dias_a_temporalidad).astype('object')
     return df
 
 
@@ -382,7 +389,7 @@ def normalizar_periodicidad_pago(valor):
 
 def periodicidad_a_dias(valor):
     val = normalizar_periodicidad_pago(valor)
-    return {'Semanal':7,'Quincenal':15,'Mensual':30,'Bimestral':60,'Trimestral':90,'Semestral':180,'Anual':365,'Al vencimiento':None}.get(val, None)
+    return {'Semanal':7,'Quincenal':15,'Mensual':30,'Bimestral':60,'Trimestral':90,'Semestral':180,'Anual':DAY_COUNT_BASE,'Al vencimiento':None}.get(val, None)
 
 
 def normalizar_tipo_capital(valor):
@@ -416,7 +423,7 @@ def generar_calendario_flujos(df: pd.DataFrame, cartera_nombre: str, tipo_flujo:
         if pd.isna(saldo_actual): saldo_actual = 0
         if pd.isna(principal_original): principal_original = saldo_actual
         base_calc = pd.to_numeric(row.get(base_col), errors='coerce')
-        if pd.isna(base_calc) or base_calc <= 0: base_calc = 365
+        if pd.isna(base_calc) or base_calc <= 0: base_calc = DAY_COUNT_BASE
         periodicidad = normalizar_periodicidad_pago(row.get(periodicidad_col, 'Al vencimiento'))
         tipo_capital = normalizar_tipo_capital(row.get(tipo_capital_col, 'Bullet'))
         if pd.isna(tasa) or tasa <= 0 or pd.isna(fecha_inicio) or pd.isna(fecha_fin) or saldo_actual <= 0:
@@ -477,7 +484,7 @@ def build_current_month_execution_summary(calendario: pd.DataFrame, base_df: pd.
 
 
 def add_control_emoji(value: str) -> str:
-    mapping = {'Cubierto':'🟢 Cubierto','Parcial':'🟡 Parcial','Pendiente':'🔴 Pendiente','Sin programa / capturado':'🔵 Sin programa / capturado','Sin movimiento':'⚪ Sin movimiento'}
+    mapping = {'Cubierto':'Cubierto','Parcial':'Parcial','Pendiente':'Pendiente','Sin programa / capturado':'Sin programa / capturado','Sin movimiento':'Sin movimiento'}
     return mapping.get(str(value), str(value))
 
 
@@ -619,12 +626,12 @@ def build_timeline_chart(df: pd.DataFrame, name_col: str, start_col: str, end_co
 
 
 def style_status(value):
-    mapping = {'vencido':'🔴 Vencido','vence hoy':'🟡 Vence hoy','activo':'🟢 Activo','sin fecha':'⚪ Sin fecha'}
+    mapping = {'vencido':'Vencido','vence hoy':'Vence hoy','activo':'Activo','sin fecha':'Sin fecha'}
     return mapping.get(str(value).lower(), str(value))
 
 
 def style_event_status(value):
-    mapping = {'vencido':'🔴 Vencido','hoy':'🟡 Hoy','programado':'🟢 Programado'}
+    mapping = {'vencido':'Vencido','hoy':'Hoy','programado':'Programado'}
     return mapping.get(str(value).lower(), str(value))
 
 
@@ -832,57 +839,57 @@ def concentracion_ajustada_por_rendimiento(df: pd.DataFrame) -> float:
 
 def semaforo(valor, tipo):
     if pd.isna(valor):
-        return "⚪ Sin dato"
+        return "Sin dato"
     if tipo == "spread":
         if valor >= 0.06:
-            return "🟢 Sólido"
+            return "Sólido"
         if valor >= 0.03:
-            return "🟡 A revisar"
-        return "🔴 Presión"
+            return "A revisar"
+        return "Presión"
     if tipo == "concentracion_top1":
         if valor <= 0.20:
-            return "🟢 Diversificado"
+            return "Diversificado"
         if valor <= 0.30:
-            return "🟡 Media"
-        return "🔴 Alta"
+            return "Media"
+        return "Alta"
     if tipo == "gap":
         if valor >= 0:
-            return "🟢 Cubierto"
-        return "🔴 Déficit"
+            return "Cubierto"
+        return "Déficit"
     if tipo == "plazo":
         if valor <= 30:
-            return "🟢 Alineado"
+            return "Alineado"
         if valor <= 90:
-            return "🟡 Moderado"
-        return "🔴 Relevante"
+            return "Moderado"
+        return "Relevante"
     if tipo == "cobertura":
         if valor >= 1.0:
-            return "🟢 Suficiente"
+            return "Suficiente"
         if valor >= 0.9:
-            return "🟡 Justa"
-        return "🔴 Baja"
-    return "⚪ N/D"
+            return "Justa"
+        return "Baja"
+    return "N/D"
 
 
 def color_status(value):
     if str(value).lower() == "vencido":
-        return "🔴 Vencido"
+        return "Vencido"
     if str(value).lower() == "vence hoy":
-        return "🟡 Vence hoy"
+        return "Vence hoy"
     if str(value).lower() == "activo":
-        return "🟢 Activo"
+        return "Activo"
     if str(value).lower() == "sin fecha":
-        return "⚪ Sin fecha"
+        return "Sin fecha"
     return str(value)
 
 
 def color_event_status(value):
     if str(value).lower() == "vencido":
-        return "🔴 Vencido"
+        return "Vencido"
     if str(value).lower() == "hoy":
-        return "🟡 Hoy"
+        return "Hoy"
     if str(value).lower() == "programado":
-        return "🟢 Programado"
+        return "Programado"
     return str(value)
 
 
@@ -896,7 +903,7 @@ def crear_datos_demo():
         'moneda':['MXN','USD','MXN','USD','MXN'],
         'periodicidad_pago':['Mensual','Trimestral','Al vencimiento','Mensual','Mensual'],
         'tipo_pago_capital':['Bullet','Bullet','Bullet','Bullet','Bullet'],
-        'base_calculo':[365,365,365,365,365],
+        'base_calculo':[360,360,360,360,360],
         'monto_pagado_mes_actual':[0,0,0,0,0],
         'estatus':['','','','',''],
         'producto':['Pagaré','Pagaré','Captación','Pagaré','Captación'],
@@ -910,7 +917,7 @@ def crear_datos_demo():
         'fecha_de_termino':['2026-05-10','2026-08-14','2026-08-07','2026-05-30','2026-06-24','2026-11-15'],
         'periodicidad_cobro':['Mensual','Mensual','Trimestral','Mensual','Mensual','Al vencimiento'],
         'tipo_cobro_capital':['Bullet','Amortizable','Bullet','Bullet','Amortizable','Bullet'],
-        'base_calculo':[365,365,365,365,365,365],
+        'base_calculo':[360,360,360,360,360,360],
         'monto_cobrado_mes_actual':[0,0,0,0,0,0],
         'estatus':['','','','','',''],
         'segmento':['PyME','Consumo','Empresarial','PyME','Consumo','Empresarial'],
@@ -943,7 +950,7 @@ def cargar_excel(archivo_bytes):
     inversionistas['periodicidad_pago'] = inversionistas['periodicidad_pago'].apply(normalizar_periodicidad_pago); prestamos['periodicidad_cobro'] = prestamos['periodicidad_cobro'].apply(normalizar_periodicidad_pago)
     inversionistas['tipo_pago_capital'] = inversionistas['tipo_pago_capital'].apply(normalizar_tipo_capital); prestamos['tipo_cobro_capital'] = prestamos['tipo_cobro_capital'].apply(normalizar_tipo_capital)
     inversionistas['saldo_actual'] = inversionistas['saldo_actual'].fillna(inversionistas['monto_invertido']); prestamos['saldo_actual'] = prestamos['saldo_actual'].fillna(prestamos['monto_colocado'])
-    inversionistas['base_calculo'] = inversionistas['base_calculo'].fillna(365); prestamos['base_calculo'] = prestamos['base_calculo'].fillna(365)
+    inversionistas['base_calculo'] = inversionistas['base_calculo'].fillna(DAY_COUNT_BASE); prestamos['base_calculo'] = prestamos['base_calculo'].fillna(DAY_COUNT_BASE)
     if 'moneda' not in inversionistas.columns: inversionistas['moneda'] = 'MXN'
     inversionistas['moneda'] = inversionistas['moneda'].fillna('MXN').apply(normalizar_moneda)
     return inversionistas, prestamos
@@ -1090,7 +1097,7 @@ with tab1:
     c11.metric('Gap 30 días', fmt_money(gap_30))
     c12.metric('Concentración top 1', fmt_pct(max(conc_top1_inv, conc_top1_pre)))
     c13, c14, c15 = st.columns(3)
-    c13.metric(f'Intereses a pagar {mes_actual_label}', fmt_money(total_pagar_mes_actual), help='Costo mensual estimado del fondeo del mes actual, calculado con 30.42 días para cada inversionista activo.')
+    c13.metric(f'Intereses a pagar {mes_actual_label}', fmt_money(total_pagar_mes_actual), help='Costo mensual estimado del fondeo del mes actual, calculado con días operados del mes y base de 360 días.')
     c14.metric(f'Total a cobrar {mes_actual_label}', fmt_money(total_cobrar_mes_actual), help='Incluye interés del mes calculado con días reales para cada crédito activo más principal con vencimiento dentro del mes actual.')
     c15.metric(f'Flujo neto {mes_actual_label}', fmt_money(flujo_neto_mes_actual), help='Diferencia entre el total a cobrar del mes y los intereses a pagar del mismo mes.')
     section_title('Alertas ejecutivas')
@@ -1160,7 +1167,7 @@ with tab1:
 with tab2:
     section_title('Resumen de fondeo', 'Vista detallada del pasivo financiero y sus concentraciones.')
     render_narrative_band(fondeo_text)
-    st.info('En inversionistas, el interés mensual se calcula con una base fija de 30.42 días. La gráfica de vigencias muestra solo la ventana de los próximos 12 meses e incluye una línea vertical con la fecha actual como referencia.')
+    st.info('En inversionistas, el interés mensual se calcula con los días operados del mes y base de 360 días. La gráfica de vigencias muestra solo la ventana de los próximos 12 meses e incluye una línea vertical con la fecha actual como referencia.')
     a1, a2, a3 = st.columns(3)
     a1.metric('Total fondeo', fmt_money(total_fondeo)); a2.metric('Tasa efectiva de fondeo', fmt_pct(tasa_fondeo)); a3.metric('Costo anual total de fondeo', fmt_money(costo_anual_total_fondeo))
     a4, a5, a6 = st.columns(3)
@@ -1220,7 +1227,7 @@ with tab2:
 with tab3:
     section_title('Resumen de colocación', 'Vista comercial, financiera y operativa de la cartera colocada.')
     render_narrative_band(coloc_text)
-    st.info('En créditos, el interés del mes se calcula con los días reales del mes actual. El principal a cobrar del mes proviene del calendario de vencimientos.')
+    st.info('En créditos, el interés del mes se calcula con los días operados del mes y base de 360 días. El principal a cobrar del mes proviene del calendario de vencimientos.')
     b1, b2, b3 = st.columns(3)
     b1.metric('Monto colocado histórico', fmt_money(total_colocado))
     b2.metric('Saldo base cartera', fmt_money(saldo_base_colocacion_total))
@@ -1356,7 +1363,7 @@ with tab5:
     render_narrative_band(tesoreria_text)
     st.info("Columnas opcionales para control real: 'monto_pagado_mes_actual' en inversionistas y 'monto_cobrado_mes_actual' en préstamos. Si no vienen en el Excel, el sistema asume 0 y todo queda pendiente.")
     t1, t2, t3 = st.columns(3)
-    t1.metric(f'Intereses a pagar {mes_actual_label}', fmt_money(total_pagar_mes_actual), help='Interés mensual estimado del fondeo del mes actual con base fija de 30.42 días.')
+    t1.metric(f'Intereses a pagar {mes_actual_label}', fmt_money(total_pagar_mes_actual), help='Interés mensual estimado del fondeo del mes actual con días operados del mes y base de 360 días.')
     t2.metric(f'Total a cobrar {mes_actual_label}', fmt_money(total_cobrar_mes_actual), help='Interés del mes con días reales más principal con vencimiento dentro del mes actual.')
     t3.metric(f'Flujo neto {mes_actual_label}', fmt_money(flujo_neto_mes_actual), help='Total a cobrar del mes menos intereses a pagar del mismo mes.')
     t4, t5, t6, t7 = st.columns(4)

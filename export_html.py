@@ -203,10 +203,15 @@ def completar_plazo_dias(df, plazo_col, fecha_inicio_col, fecha_fin_col, tempora
 def completar_temporalidad(df, plazo_col="plazo_dias", temporalidad_col="temporalidad"):
     df = df.copy()
     if temporalidad_col not in df.columns:
-        df[temporalidad_col] = np.nan
+        df[temporalidad_col] = pd.Series(pd.NA, index=df.index, dtype="object")
+    else:
+        df[temporalidad_col] = df[temporalidad_col].astype("object")
+    if plazo_col not in df.columns:
+        return df
 
     vacio = df[temporalidad_col].isna() | (df[temporalidad_col].astype(str).str.strip() == "")
-    df.loc[vacio, temporalidad_col] = df.loc[vacio, plazo_col].apply(dias_a_temporalidad)
+    if vacio.any():
+        df.loc[vacio, temporalidad_col] = df.loc[vacio, plazo_col].apply(dias_a_temporalidad).astype("object")
     return df
 
 
