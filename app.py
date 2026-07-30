@@ -128,7 +128,7 @@ inject_custom_css(); render_hero()
 def limpiar_texto(texto: str) -> str:
     texto = str(texto).strip().lower()
     texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('utf-8')
-    for ch in [' ', '-', '/', '.', '(', ')', '%']:
+    for ch in [' ', '\n', '\r', '-', '/', '.', '(', ')', '%']:
         texto = texto.replace(ch, '_')
     while '__' in texto:
         texto = texto.replace('__', '_')
@@ -137,6 +137,81 @@ def limpiar_texto(texto: str) -> str:
 
 def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy(); df.columns = [limpiar_texto(c) for c in df.columns]; return df
+
+
+def extraer_tabla(raw: pd.DataFrame, encabezados_requeridos: set[str]) -> pd.DataFrame:
+    for row_index in range(min(len(raw), 20)):
+        encabezados = [limpiar_texto(valor) if pd.notna(valor) else '' for valor in raw.iloc[row_index].tolist()]
+        if encabezados_requeridos.issubset(set(encabezados)):
+            tabla = raw.iloc[row_index + 1:].copy()
+            tabla.columns = encabezados
+            tabla = tabla.loc[:, [col for col in tabla.columns if col]]
+            tabla = tabla.dropna(how='all').reset_index(drop=True)
+            return tabla
+    raise ValueError(f"No encontré los encabezados esperados: {', '.join(sorted(encabezados_requeridos))}.")
+
+
+def convertir_formato_efinancial(hojas_raw: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame] | None:
+    hojas = {limpiar_texto(nombre): tabla for nombre, tabla in hojas_raw.items()}
+    if 'reporte_inversionistas' not in hojas or 'desglosecartera' not in hojas:
+        return None
+
+    inversionistas = extraer_tabla(
+        hojas['reporte_inversionistas'],
+        {'nombre', 'monto_de_inversion', 'interes_pactado', 'fecha_deposito', 'fecha_vencimiento'},
+    )
+    prestamos = extraer_tabla(
+        hojas['desglosecartera'],
+        {'nombre_acreditado', 'fecha_de_otorgamiento', 'fecha_de_vencimiento', 'capital_entregado', 'tasa'},
+    )
+
+    inversionistas = inversionistas.rename(columns={
+        'nombre': 'cliente_inversionista',
+        'monto_de_inversion': 'monto_invertido',
+        'interes_pactado': 'tasa_efectiva',
+        'fecha_deposito': 'fecha_inicio',
+        'fecha_vencimiento': 'fecha_vencimiento',
+        'status_contrato': 'estatus',
+        'plazo_meses': 'plazo_meses',
+    })
+    inversionistas = inversionistas[
+        inversionistas['cliente_inversionista'].notna() & inversionistas['monto_invertido'].notna()
+    ].copy()
+    inversionistas['plazo_dias'] = a_numero(inversionistas.get('plazo_meses', pd.Series(index=inversionistas.index, dtype=float))) * 30
+    inversionistas['periodicidad_pago'] = 'Mensual'
+    inversionistas['tipo_pago_capital'] = 'Bullet'
+    inversionistas['saldo_actual'] = inversionistas['monto_invertido']
+    inversionistas['base_calculo'] = DAY_COUNT_BASE
+    inversionistas['moneda'] = 'MXN'
+    inversionistas['producto'] = 'Contrato de inversión'
+    inversionistas['asesor'] = np.nan
+
+    prestamos = prestamos.rename(columns={
+        'nombre_acreditado': 'cliente_credito',
+        'fecha_de_otorgamiento': 'fecha_desembolso',
+        'fecha_de_vencimiento': 'fecha_vencimiento',
+        'frecuencia_de_pago_capital': 'periodicidad_cobro',
+        'capital_entregado': 'monto_colocado',
+        'estatus': 'estatus',
+        'producto': 'segmento',
+        'tasa': 'tasa_mensual_pct',
+        'capital_vigente': 'capital_vigente',
+        'capital_vencido': 'capital_vencido',
+    })
+    prestamos = prestamos[
+        prestamos['cliente_credito'].notna() & prestamos['monto_colocado'].notna()
+    ].copy()
+    prestamos['tasa_colocacion'] = a_numero(prestamos['tasa_mensual_pct']) * 12 / 100
+    capital_vigente = a_numero(prestamos.get('capital_vigente', pd.Series(index=prestamos.index, dtype=float))).fillna(0)
+    capital_vencido = a_numero(prestamos.get('capital_vencido', pd.Series(index=prestamos.index, dtype=float))).fillna(0)
+    prestamos['saldo_actual'] = (capital_vigente + capital_vencido).replace(0, np.nan)
+    prestamos['tipo_cobro_capital'] = prestamos['periodicidad_cobro'].apply(
+        lambda valor: 'Bullet' if limpiar_texto(valor) in {'al_final_del_credito', 'pagare_unico'} else 'Amortizable'
+    )
+    prestamos['base_calculo'] = DAY_COUNT_BASE
+    prestamos['asesor'] = np.nan
+
+    return {'inversionistas': inversionistas, 'prestamos': prestamos}
 
 
 def a_numero(serie: pd.Series) -> pd.Series:
@@ -383,7 +458,7 @@ def construir_estatus_automatico(df: pd.DataFrame, fecha_fin_col: str = 'fecha_v
 def normalizar_periodicidad_pago(valor):
     if pd.isna(valor): return 'Al vencimiento'
     t = limpiar_texto(valor)
-    mapping = {'semanal':'Semanal','quincenal':'Quincenal','mensual':'Mensual','bimestral':'Bimestral','trimestral':'Trimestral','semestral':'Semestral','anual':'Anual','al_vencimiento':'Al vencimiento','vencimiento':'Al vencimiento','bullet':'Al vencimiento','pago_unico':'Al vencimiento'}
+    mapping = {'semanal':'Semanal','quincenal':'Quincenal','mensual':'Mensual','bimestral':'Bimestral','trimestral':'Trimestral','semestral':'Semestral','anual':'Anual','al_vencimiento':'Al vencimiento','al_final_del_credito':'Al vencimiento','vencimiento':'Al vencimiento','bullet':'Al vencimiento','pago_unico':'Al vencimiento','pagare_unico':'Al vencimiento'}
     return mapping.get(t, str(valor).strip().title())
 
 
@@ -929,8 +1004,16 @@ def crear_datos_demo():
 @st.cache_data
 def cargar_excel(archivo_bytes):
     archivo = BytesIO(archivo_bytes)
-    hojas = pd.read_excel(archivo, sheet_name=None)
-    hojas = {limpiar_texto(k): normalizar_columnas(v) for k, v in hojas.items()}
+    hojas_raw = pd.read_excel(archivo, sheet_name=None, header=None)
+    hojas = convertir_formato_efinancial(hojas_raw)
+    if hojas is None:
+        hojas = {}
+        for nombre, raw in hojas_raw.items():
+            if raw.empty:
+                continue
+            tabla = raw.iloc[1:].copy()
+            tabla.columns = raw.iloc[0].tolist()
+            hojas[limpiar_texto(nombre)] = normalizar_columnas(tabla.dropna(how='all').reset_index(drop=True))
     if 'inversionistas' not in hojas: raise ValueError("No encontré la hoja 'inversionistas'.")
     if 'prestamos' not in hojas: raise ValueError("No encontré la hoja 'prestamos'.")
     inversionistas = hojas['inversionistas'].copy(); prestamos = hojas['prestamos'].copy()
@@ -957,8 +1040,8 @@ def cargar_excel(archivo_bytes):
 
 
 st.sidebar.markdown('## Carga de información')
-usar_demo = st.sidebar.checkbox('Usar datos demo', value=True)
-archivo = st.sidebar.file_uploader('Sube tu Excel', type=['xlsx', 'xls'])
+usar_demo = st.sidebar.checkbox('Usar datos demo', value=False)
+archivo = st.sidebar.file_uploader('Sube otro Excel (opcional)', type=['xlsx', 'xls'])
 if usar_demo:
     inversionistas_raw, prestamos_raw = crear_datos_demo(); buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -966,10 +1049,12 @@ if usar_demo:
         prestamos_raw.to_excel(writer, sheet_name='prestamos', index=False)
     inversionistas, prestamos = cargar_excel(buffer.getvalue())
 else:
-    if archivo is None:
-        st.info("Sube un archivo Excel con las hojas 'inversionistas' y 'prestamos'.")
+    if archivo is not None:
+        inversionistas, prestamos = cargar_excel(archivo.getvalue())
+        st.sidebar.caption(f'Fuente: {archivo.name}')
+    else:
+        st.info("Sube tu archivo Excel para comenzar. La información se procesa únicamente durante esta sesión y no se guarda en la aplicación.")
         st.stop()
-    inversionistas, prestamos = cargar_excel(archivo.getvalue())
 
 
 st.sidebar.markdown('## Filtros')
